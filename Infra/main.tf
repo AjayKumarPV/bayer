@@ -232,9 +232,10 @@ data "aws_ami" "amazon_linux" {
 
   filter {
     name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+    values = ["al2023-ami-*-x86_64"]
   }
 }
+
 
 
 resource "aws_instance" "bastion" {
@@ -260,11 +261,12 @@ resource "aws_instance" "app" {
 
   user_data = <<-EOF
 #!/bin/bash
-yum update -y
-yum install -y python3 git
+dnf update -y
+dnf install -y python3 git
 
-pip3 install django
-pip3 install gunicorn
+python3 -m ensurepip --upgrade
+python3 -m pip install --upgrade pip
+python3 -m pip install django gunicorn
 
 cd /home/ec2-user
 
@@ -299,7 +301,7 @@ from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
-    path('polls/', include('polls.urls')),
+    path('', include('polls.urls')),
     path('admin/', admin.site.urls),
 ]
 EOL
