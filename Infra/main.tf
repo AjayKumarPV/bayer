@@ -18,20 +18,20 @@ resource "aws_internet_gateway" "igw" {
 }
 
 
-resource "aws_subnet" "public" {
+resource "aws_subnet" "public_1" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidr
+  cidr_block              = var.public_subnet_1_cidr
   availability_zone       = "${var.aws_region}a"
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "bayer-public-subnet"
+    Name = "bayer-public-subnet-1"
   }
 }
 
 resource "aws_subnet" "public_2" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.3.0/24"
+  cidr_block              = var.public_subnet_2_cidr
   availability_zone       = "${var.aws_region}b"
   map_public_ip_on_launch = true
 
@@ -43,13 +43,23 @@ resource "aws_subnet" "public_2" {
 
 
 
-resource "aws_subnet" "private" {
+resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidr
+  cidr_block        = var.private_subnet_a_cidr
   availability_zone = "${var.aws_region}a"
 
   tags = {
-    Name = "bayer-private-subnet"
+    Name = "bayer-private-subnet-a"
+  }
+}
+
+resource "aws_subnet" "private_b" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_b_cidr
+  availability_zone = "${var.aws_region}b"
+
+  tags = {
+    Name = "bayer-private-subnet-b"
   }
 }
 
@@ -62,13 +72,17 @@ resource "aws_route_table" "public_rt" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.igw.id
   }
+
+  tags = {
+    Name = "bayer-public-rt"
+  }
 }
 
 
 
 
-resource "aws_route_table_association" "public_assoc" {
-  subnet_id      = aws_subnet.public.id
+resource "aws_route_table_association" "public_assoc_1" {
+  subnet_id      = aws_subnet.public_1.id
   route_table_id = aws_route_table.public_rt.id
 }
 
@@ -86,7 +100,7 @@ resource "aws_eip" "nat_eip" {
 
 resource "aws_nat_gateway" "nat" {
   allocation_id = aws_eip.nat_eip.id
-  subnet_id     = aws_subnet.public.id
+  subnet_id     = aws_subnet.public_1.id
 
   tags = {
     Name = "bayer-nat"
@@ -110,11 +124,15 @@ resource "aws_route_table" "private_rt" {
 }
 
 
-resource "aws_route_table_association" "private_assoc" {
-  subnet_id      = aws_subnet.private.id
+resource "aws_route_table_association" "private_assoc_1" {
+  subnet_id      = aws_subnet.private_a.id
   route_table_id = aws_route_table.private_rt.id
 }
 
+resource "aws_route_table_association" "private_assoc_2" {
+  subnet_id      = aws_subnet.private_b.id
+  route_table_id = aws_route_table.private_rt.id
+}
 
 resource "aws_security_group" "alb_sg" {
   name   = "alb-sg"
@@ -226,6 +244,7 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 }
 
 
+
 data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
@@ -236,12 +255,13 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
+data "aws_caller_identity" "current" {}
 
 
 resource "aws_instance" "bastion" {
   ami                    = data.aws_ami.amazon_linux.id
   instance_type          = "t3.micro"
-  subnet_id              = aws_subnet.public.id
+  subnet_id              = aws_subnet.public_1.id
   vpc_security_group_ids = [aws_security_group.bastion_sg.id]
   key_name = var.key_name
 
@@ -251,15 +271,23 @@ resource "aws_instance" "bastion" {
 }
 
 
-resource "aws_instance" "app" {
-  ami                    = data.aws_ami.amazon_linux.id
-  instance_type          = "t3.micro"
-  subnet_id              = aws_subnet.private.id
-  vpc_security_group_ids = [aws_security_group.app_sg.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+resource "aws_launch_template" "app_lt" {
+  name_prefix   = "bayer-app-"
+  image_id      = data.aws_ami.amazon_linux.id
+  instance_type = "t3.micro"
+
   key_name = var.key_name
 
-  user_data = <<-EOF
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_profile.name
+  }
+
+  depends_on = [aws_nat_gateway.nat]
+
+  vpc_security_group_ids = [aws_security_group.app_sg.id]
+
+
+  user_data = base64encode(<<EOF
 #!/bin/bash
 dnf update -y
 dnf install -y python3 git
@@ -311,15 +339,9 @@ python3 manage.py migrate
 # Allow external access
 sed -i "s/ALLOWED_HOSTS = .*/ALLOWED_HOSTS = ['*']/" mysite/settings.py
 
-nohup gunicorn --bind 0.0.0.0:8000 mysite.wsgi:application &
+nohup gunicorn --bind 0.0.0.0:8000 mysite.wsgi:application > /home/ec2-user/gunicorn.log 2>&1 &
 EOF
-
-  tags = {
-    Name = "bayer-app-server"
-  }
-
-  depends_on = [aws_nat_gateway.nat]
-
+  )
 }
 
 
@@ -330,7 +352,7 @@ resource "aws_lb" "app_alb" {
   name               = "bayer-alb"
   load_balancer_type = "application"
   subnets = [
-    aws_subnet.public.id,
+    aws_subnet.public_1.id,
     aws_subnet.public_2.id
   ]
 
@@ -358,13 +380,6 @@ resource "aws_lb_target_group" "app_tg" {
   }
 }
 
-resource "aws_lb_target_group_attachment" "app_attach" {
-  target_group_arn = aws_lb_target_group.app_tg.arn
-  target_id        = aws_instance.app.id
-  port             = 8000
-
-  depends_on = [aws_instance.app]
-}
 
 
 resource "aws_lb_listener" "http_listener" {
@@ -375,6 +390,33 @@ resource "aws_lb_listener" "http_listener" {
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+}
+
+
+resource "aws_autoscaling_group" "app_asg" {
+  name                      = "bayer-app-asg"
+  desired_capacity          = 1
+  max_size                  = 2
+  min_size                  = 1
+  vpc_zone_identifier = [
+    aws_subnet.private_a.id,
+    aws_subnet.private_b.id
+  ]
+
+  target_group_arns         = [aws_lb_target_group.app_tg.arn]
+  health_check_type         = "ELB"
+  health_check_grace_period = 60
+
+  launch_template {
+    id      = aws_launch_template.app_lt.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "app-server"
+    propagate_at_launch = true
   }
 }
 
